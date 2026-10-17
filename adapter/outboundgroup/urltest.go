@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/metacubex/mihomo/common/callback"
@@ -22,6 +24,12 @@ func urlTestWithTolerance(tolerance uint16) urlTestOption {
 	}
 }
 
+func urlTestWithThroughput(opt throughputOption) urlTestOption {
+	return func(u *URLTest) {
+		u.throughputOpt = &opt
+	}
+}
+
 type URLTest struct {
 	*GroupBase
 	selected       string
@@ -33,6 +41,8 @@ type URLTest struct {
 	Icon           string
 	fastNode       C.Proxy
 	fastSingle     *singledo.Single[C.Proxy]
+	throughputOpt  *throughputOption
+	throughput     *throughputTester
 }
 
 func (u *URLTest) Now() string {
@@ -107,6 +117,9 @@ func (u *URLTest) healthCheck() {
 }
 
 func (u *URLTest) fast(touch bool) C.Proxy {
+	if touch && u.throughput != nil {
+		u.throughput.touch()
+	}
 	elm, _, shared := u.fastSingle.Do(func() (C.Proxy, error) {
 		proxies := u.GetProxies(touch)
 		if u.selected != "" {
@@ -118,6 +131,13 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 					u.fastNode = proxy
 					return proxy, nil
 				}
+			}
+		}
+
+		if u.throughput != nil {
+			if fast := u.throughput.pick(proxies, u.testUrl); fast != nil {
+				u.fastNode = fast
+				return fast, nil
 			}
 		}
 
@@ -173,7 +193,7 @@ func (u *URLTest) MarshalJSON() ([]byte, error) {
 	for _, proxy := range u.GetProxies(false) {
 		all = append(all, proxy.Name())
 	}
-	return json.Marshal(map[string]any{
+	m := map[string]any{
 		"type":           u.Type().String(),
 		"now":            u.Now(),
 		"all":            all,
@@ -182,7 +202,14 @@ func (u *URLTest) MarshalJSON() ([]byte, error) {
 		"fixed":          u.selected,
 		"hidden":         u.Hidden,
 		"icon":           u.Icon,
-	})
+	}
+	if u.throughput != nil {
+		speeds, lastTest := u.throughput.snapshot()
+		m["strategy"] = "throughput"
+		m["speeds"] = speeds // bytes per second
+		m["lastSpeedTest"] = lastTest
+	}
+	return json.Marshal(m)
 }
 
 func (u *URLTest) Providers() []P.ProxyProvider {
@@ -205,6 +232,28 @@ func parseURLTestOption(config map[string]any) []urlTestOption {
 		if tolerance, ok := elm.(int); ok {
 			opts = append(opts, urlTestWithTolerance(uint16(tolerance)))
 		}
+	}
+
+	// strategy: throughput
+	if strategy, ok := config["strategy"].(string); ok && strings.EqualFold(strategy, "throughput") {
+		opt := throughputOption{}
+		if v, ok := config["throughput-url"].(string); ok {
+			opt.url = v
+		}
+		if v, ok := config["throughput-timeout"].(int); ok {
+			opt.timeout = time.Duration(v) * time.Millisecond
+		}
+		if v, ok := config["throughput-interval"].(int); ok {
+			opt.interval = time.Duration(v) * time.Second
+		}
+		if v, ok := config["throughput-max-bytes"].(int); ok {
+			opt.maxBytes = int64(v)
+		}
+		opt.tolerance = -1
+		if v, ok := config["throughput-tolerance"].(int); ok {
+			opt.tolerance = v
+		}
+		opts = append(opts, urlTestWithThroughput(opt))
 	}
 
 	return opts
@@ -232,6 +281,11 @@ func NewURLTest(option *GroupCommonOption, providers []P.ProxyProvider, options 
 
 	for _, option := range options {
 		option(urlTest)
+	}
+
+	if urlTest.throughputOpt != nil {
+		urlTest.throughput = newThroughputTester(*urlTest.throughputOpt, urlTest.GroupBase, urlTest.fastSingle, option.Lazy)
+		runtime.SetFinalizer(urlTest, func(u *URLTest) { u.throughput.close() })
 	}
 
 	return urlTest
