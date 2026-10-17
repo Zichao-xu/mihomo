@@ -28,6 +28,27 @@ const (
 	throughputStartupDelay     = 30 * time.Second
 )
 
+// All groups share one lock so only one speed test runs at a time process-wide,
+// and share results so a proxy in several groups is downloaded once per round.
+var (
+	throughputMu    sync.Mutex
+	throughputCache = map[throughputCacheKey]throughputResult{}
+)
+
+const throughputCacheTTL = 24 * time.Hour
+
+type throughputCacheKey struct {
+	proxy    string
+	url      string
+	timeout  time.Duration
+	maxBytes int64
+}
+
+type throughputResult struct {
+	speed uint64
+	at    time.Time
+}
+
 type throughputOption struct {
 	url       string
 	timeout   time.Duration
@@ -130,11 +151,10 @@ func (t *throughputTester) check() {
 		if t.ctx.Err() != nil {
 			return
 		}
-		speed, err := t.measure(proxy)
-		if err != nil {
-			log.Debugln("[Throughput] %s %s: %v", t.gb.Name(), proxy.Name(), err)
-		}
-		speeds[proxy.Name()] = speed
+		speeds[proxy.Name()] = t.measureShared(proxy)
+	}
+	if t.ctx.Err() != nil {
+		return
 	}
 
 	t.mu.Lock()
@@ -144,6 +164,34 @@ func (t *throughputTester) check() {
 	t.fastSingle.Reset()
 
 	log.Infoln("[Throughput] %s done, top: %s", t.gb.Name(), topSpeeds(speeds, 3))
+}
+
+// measureShared reuses a result measured by any group within half of this group's
+// interval, otherwise measures under the global lock and publishes the result.
+func (t *throughputTester) measureShared(proxy C.Proxy) uint64 {
+	throughputMu.Lock()
+	defer throughputMu.Unlock()
+
+	key := throughputCacheKey{proxy: proxy.Name(), url: t.url, timeout: t.timeout, maxBytes: t.maxBytes}
+	if r, ok := throughputCache[key]; ok && time.Since(r.at) < t.interval/2 {
+		return r.speed
+	}
+	if t.ctx.Err() != nil {
+		return 0
+	}
+
+	speed, err := t.measure(proxy)
+	if err != nil {
+		log.Debugln("[Throughput] %s %s: %v", t.gb.Name(), proxy.Name(), err)
+	}
+	now := time.Now()
+	for k, r := range throughputCache {
+		if now.Sub(r.at) > throughputCacheTTL {
+			delete(throughputCache, k)
+		}
+	}
+	throughputCache[key] = throughputResult{speed: speed, at: now}
+	return speed
 }
 
 func (t *throughputTester) measure(proxy C.Proxy) (uint64, error) {
