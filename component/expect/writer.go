@@ -11,7 +11,8 @@ import (
 	"time"
 )
 
-const keepFiles = 48 // 按小时分文件,留两天
+// 按小时分文件,总量超过上限就从最旧的删。默认目录在内存盘上,不能放任增长
+const maxTotalBytes = 150 << 20
 
 // writer 异步写 JSONL,队列满了就丢,绝不阻塞转发路径
 type writer struct {
@@ -46,6 +47,7 @@ func (w *writer) run() {
 		f    *os.File
 		bw   *bufio.Writer
 		hour string
+		n    int
 	)
 	flush := time.NewTicker(2 * time.Second)
 	for {
@@ -65,13 +67,15 @@ func (w *writer) run() {
 				}
 				bw = bufio.NewWriterSize(f, 64<<10)
 				hour = h
-				w.prune()
 			}
 			bw.Write(b)
 			bw.WriteByte('\n')
 		case <-flush.C:
 			if bw != nil {
 				bw.Flush()
+			}
+			if n++; n%30 == 0 {
+				w.prune()
 			}
 		}
 	}
@@ -83,13 +87,22 @@ func (w *writer) prune() {
 		return
 	}
 	var names []string
+	sizes := map[string]int64{}
+	var total int64
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "expect-") {
+		if !strings.HasPrefix(e.Name(), "expect-") {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
 			names = append(names, e.Name())
+			sizes[e.Name()] = info.Size()
+			total += info.Size()
 		}
 	}
 	sort.Strings(names)
-	for i := 0; i < len(names)-keepFiles; i++ {
+	// 最新的那个正在写,不删
+	for i := 0; i < len(names)-1 && total > maxTotalBytes; i++ {
 		os.Remove(filepath.Join(w.dir, names[i]))
+		total -= sizes[names[i]]
 	}
 }
