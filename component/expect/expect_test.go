@@ -221,3 +221,78 @@ func TestConcurrentNoRace(t *testing.T) {
 		t.Fatalf("active leak %d", len(e.active))
 	}
 }
+
+func TestAssignAndBudget(t *testing.T) {
+	e := testEngine(map[string][]string{"G": {"N1", "N2"}, "Solo": {"N1"}})
+	e.hedge.p = 0.5
+	old := std
+	std = e
+	defer func() { std = old }()
+
+	if Assign([]string{"N1"}) != "" || Assign([]string{"N1", "Solo"}) != "" {
+		t.Fatal("没有可选备选的连接不该进实验")
+	}
+	arms := map[string]int{}
+	for i := 0; i < 1000; i++ {
+		arms[Assign([]string{"N1", "G"})]++
+	}
+	if arms[ArmHedge] < 400 || arms[ArmControl] < 400 {
+		t.Fatalf("分组不均: %v", arms)
+	}
+	// 1000 条符合条件的连接 → 预算 5% 但封顶 20 次
+	n := 0
+	for {
+		ok, why := TakeHedge("N1")
+		if !ok {
+			if why != "budget" {
+				t.Fatal(why)
+			}
+			break
+		}
+		n++
+	}
+	if n != hedgeBurst {
+		t.Fatalf("预算 %d", n)
+	}
+	for i := 0; i < 20; i++ {
+		Assign([]string{"N1", "G"})
+	}
+	if ok, _ := TakeHedge("N1"); !ok {
+		t.Fatal("20 条新连接应攒出 1 次预算")
+	}
+}
+
+func TestHedgeRefusedOnLocalFault(t *testing.T) {
+	e := testEngine(map[string][]string{"G": {"N1", "N2"}})
+	e.hedge.p = 1
+	e.hedge.tokens = 10
+	old := std
+	std = e
+	defer func() { std = old }()
+	now := time.Now()
+	e.attribute("N2", now)
+	e.attribute("DIRECT", now)
+	if ok, why := TakeHedge("N1"); ok || why != "local" {
+		t.Fatalf("多条路同时出问题时换路没用: %v %s", ok, why)
+	}
+}
+
+func TestHedgePlanNeedsData(t *testing.T) {
+	e := testEngine(map[string][]string{"G": {"N1", "N2"}})
+	old := std
+	std = e
+	defer func() { std = old }()
+	if _, _, ok := HedgePlan("N1", "G", "a.com"); ok {
+		t.Fatal("没数据不该对冲")
+	}
+	now := time.Now()
+	for i := 0; i < 40; i++ {
+		n1, n2 := e.node("N1"), e.node("N2")
+		n1.first.add(now, 100*time.Millisecond)
+		n2.first.add(now, 150*time.Millisecond)
+	}
+	d, alt, ok := HedgePlan("N1", "G", "a.com")
+	if !ok || alt != "N2" || d < 100*time.Millisecond || d > 130*time.Millisecond {
+		t.Fatalf("plan %v %s %v", d, alt, ok)
+	}
+}

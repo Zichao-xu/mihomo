@@ -66,6 +66,7 @@ type Engine struct {
 	rnd     *rand.Rand
 
 	counters counters
+	hedge    hedgePolicy
 }
 
 var std *Engine
@@ -79,6 +80,7 @@ func Start(dir string) {
 		return
 	}
 	e := newEngine(newWriter(dir))
+	e.hedge.p = parseHedge()
 	go e.loop()
 	std = e
 }

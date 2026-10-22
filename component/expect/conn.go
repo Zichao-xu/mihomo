@@ -10,24 +10,26 @@ type Conn struct {
 	mu sync.Mutex
 	e  *Engine
 
-	start              time.Time
-	node, group, rule  string
-	host, src, dst     string
-	members            []string
-	dial               time.Duration
-	shadow             string
-	known              int
-	up, down           int64
-	exchanges          int
-	firstWait          time.Duration
-	maxWait, maxGap    time.Duration
-	flags              int
-	sending, delivered bool
-	waitFrom, lastDown time.Time
-	respBytes          int64
-	smallGaps          int // 还没计入节点分布的小间隔(<minGap)个数,攒批写入免得每个包都抢锁
-	open               *flag
-	closed             bool
+	start                time.Time
+	node, group, rule    string
+	host, src, dst       string
+	members              []string
+	dial                 time.Duration
+	shadow               string
+	known                int
+	up, down             int64
+	exchanges            int
+	firstWait            time.Duration
+	maxWait, maxGap      time.Duration
+	flags                int
+	sending, delivered   bool
+	waitFrom, lastDown   time.Time
+	respBytes            int64
+	smallGaps            int // 还没计入节点分布的小间隔(<minGap)个数,攒批写入免得每个包都抢锁
+	open                 *flag
+	arm, hedge, hedgeAlt string
+	skipFirst            bool // 首包由备选节点送达,不计入原节点分布
+	closed               bool
 }
 
 // flag 是一次"偏离预期"的判定,等结果出来后与当时的预估对照
@@ -134,16 +136,20 @@ func (c *Conn) down_(now time.Time, b int64) {
 	c.down += b
 	if c.sending {
 		w := now.Sub(c.waitFrom)
-		n := c.e.node(c.node)
-		n.mu.Lock()
-		if c.delivered {
-			n.wait.add(now, w)
-		} else {
-			n.first.add(now, w)
+		if !c.delivered {
 			c.firstWait = w
 		}
-		n.mu.Unlock()
-		c.e.addHostWait(c.host, now, w)
+		if c.delivered || !c.skipFirst {
+			n := c.e.node(c.node)
+			n.mu.Lock()
+			if c.delivered {
+				n.wait.add(now, w)
+			} else {
+				n.first.add(now, w)
+			}
+			n.mu.Unlock()
+			c.e.addHostWait(c.host, now, w)
+		}
 		if w > c.maxWait {
 			c.maxWait = w
 		}
@@ -286,6 +292,13 @@ func (c *Conn) close_(now time.Time) {
 	if c.group != "" {
 		rec["shadow"] = c.shadow
 		rec["known"] = c.known
+	}
+	if c.arm != "" {
+		rec["arm"] = c.arm
+	}
+	if c.hedge != "" {
+		rec["hedge"] = c.hedge
+		rec["hedge_alt"] = c.hedgeAlt
 	}
 	hasBytes := c.up > 0 || c.down > 0
 	c.mu.Unlock()

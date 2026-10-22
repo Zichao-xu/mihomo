@@ -151,9 +151,9 @@ func (tt *tcpTracker) Upstream() any {
 	return tt.Conn
 }
 
-// SetDial 告诉影子模块拨通出口用了多久
-func (tt *tcpTracker) SetDial(d time.Duration) {
-	tt.obs.SetDial(d)
+// Expect 返回这条连接的影子记录,影子模式关闭时为 nil
+func (tt *tcpTracker) Expect() *expect.Conn {
+	return tt.obs
 }
 
 func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {

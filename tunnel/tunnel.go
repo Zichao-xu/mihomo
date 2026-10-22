@@ -597,10 +597,20 @@ func handleTCPConn(connCtx C.ConnContext) {
 		return
 	}
 	logMetadata(metadata, rule, remoteConn)
+	dialDur := time.Since(dialStart)
+	remoteConn, arm := maybeHedge(remoteConn, dialMetadata, peekBytes[:peekLen])
 
 	remoteConn = statistic.NewTCPTracker(remoteConn, statistic.DefaultManager, metadata, rule, int64(peekLen), 0, true)
-	if t, ok := remoteConn.(interface{ SetDial(time.Duration) }); ok {
-		t.SetDial(time.Since(dialStart))
+	if t, ok := remoteConn.(interface{ Expect() *expect.Conn }); ok {
+		if obs := t.Expect(); obs != nil {
+			obs.SetDial(dialDur)
+			obs.SetArm(arm)
+			if hc, ok := t.(interface{ Upstream() any }); ok {
+				if h, ok := hc.Upstream().(*hedgeConn); ok {
+					h.SetExpect(obs)
+				}
+			}
+		}
 	}
 	defer func(remoteConn C.Conn) {
 		_ = remoteConn.Close()

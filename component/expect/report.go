@@ -22,7 +22,8 @@ type counters struct {
 	shadowHas int
 	agree     int
 	dialFails int
-	flags     map[string]int          // kind/signal/scope
+	flags     map[string]int // kind/signal/scope
+	hedges    map[string]int
 	outcomes  map[string]*outcomeStat // signal/how
 }
 
@@ -30,6 +31,7 @@ func (c *counters) init() {
 	if c.flags == nil {
 		c.since = time.Now()
 		c.flags = map[string]int{}
+		c.hedges = map[string]int{}
 		c.outcomes = map[string]*outcomeStat{}
 	}
 }
@@ -78,6 +80,13 @@ func (c *counters) outcome(f *flag, how string, save time.Duration) {
 	}
 }
 
+func (c *counters) hedge(ev string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.init()
+	c.hedges[ev]++
+}
+
 func (c *counters) dialFail() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -111,6 +120,8 @@ type Report struct {
 	DialFails int                     `json:"dial_fails"`
 	Dropped   int64                   `json:"dropped_events"`
 	Flags     map[string]int          `json:"flags"`
+	HedgeP    float64                 `json:"hedge_p"`
+	Hedges    map[string]int          `json:"hedges"`
 	Outcomes  map[string]*outcomeStat `json:"outcomes"`
 	Nodes     []NodeReport            `json:"nodes"`
 }
@@ -155,6 +166,10 @@ func Snapshot() *Report {
 	for k, v := range c.flags {
 		r.Flags[k] = v
 	}
+	r.Hedges = make(map[string]int, len(c.hedges))
+	for k, v := range c.hedges {
+		r.Hedges[k] = v
+	}
 	r.Outcomes = make(map[string]*outcomeStat, len(c.outcomes))
 	for k, v := range c.outcomes {
 		cp := *v
@@ -162,6 +177,7 @@ func Snapshot() *Report {
 	}
 	c.mu.Unlock()
 	r.Dropped = e.out.dropped.Load()
+	r.HedgeP = e.hedgeShare()
 	return r
 }
 
