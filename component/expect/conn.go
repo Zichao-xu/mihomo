@@ -201,31 +201,35 @@ func (c *Conn) check(e *Engine, now time.Time) {
 	switch {
 	case c.sending && !c.waitFrom.IsZero():
 		first := !c.delivered
-		thr, ok := e.waitThreshold(c, now, first)
+		// 首包前能对冲到另一条路;已交付字节后只能掐断重连,原节点自己也是候选
+		alt, af, ad := e.bestPath(c, now, !first)
+		thr, ok := e.waitThreshold(c, now, first, af+ad)
 		if !ok || now.Sub(c.waitFrom) <= thr {
 			return
 		}
-		f = &flag{kind: "kill", signal: "wait", from: c.waitFrom, thr: thr}
+		f = &flag{kind: "kill", signal: "wait", from: c.waitFrom, thr: thr, alt: alt}
 		if first {
 			f.kind, f.signal = "hedge", "first"
 		}
+		if alt != "" {
+			f.est = thr + af + ad
+		}
 	case !c.sending && c.respBytes >= bulkBytes && !c.lastDown.IsZero():
 		c.flushGapsLocked(now)
-		thr, ok := e.gapThreshold(c.node, now)
+		alt, af, ad := e.bestPath(c, now, true)
+		thr, ok := e.gapThreshold(c.node, now, af+ad)
 		if !ok || now.Sub(c.lastDown) <= thr {
 			return
 		}
-		f = &flag{kind: "kill", signal: "gap", from: c.lastDown, thr: thr}
+		f = &flag{kind: "kill", signal: "gap", from: c.lastDown, thr: thr, alt: alt}
+		if alt != "" {
+			f.est = thr + af + ad
+		}
 	default:
 		return
 	}
 	f.at = now
 	f.scope = e.attribute(c.node, now)
-	var altFirst, altDial time.Duration
-	f.alt, altFirst, altDial = e.alternative(c, now)
-	if f.alt != "" {
-		f.est = f.thr + altDial + altFirst
-	}
 	c.open = f
 	c.flags++
 	e.counters.flag(f)

@@ -296,3 +296,56 @@ func TestHedgePlanNeedsData(t *testing.T) {
 		t.Fatalf("plan %v %s %v", d, alt, ok)
 	}
 }
+
+// 节点退化成"大部分很快、一成卡死"时,p95 本身就落在卡死那一档,按分位数判就永远不出手了。
+// 按"再等的期望剩余时间 > 换路成本"判,应该刚过快的那一档就出手。
+func TestActAfterBimodalActsEarly(t *testing.T) {
+	h := newHist(time.Hour)
+	for i := 0; i < 90; i++ {
+		h.add(t0, 10*time.Millisecond)
+	}
+	for i := 0; i < 10; i++ {
+		h.add(t0, 3*time.Second)
+	}
+	if p95 := h.quantile(t0, .95); p95 < 2*time.Second {
+		t.Fatalf("前提:p95 已经落在卡死档 %v", p95)
+	}
+	if got := h.actAfter(t0, h.quantile(t0, .5), 50*time.Millisecond); got > 20*time.Millisecond {
+		t.Fatalf("应在快档之后立刻出手, got %v", got)
+	}
+}
+
+// 平滑长尾、换路又不便宜时,不该一过中位数就换
+func TestActAfterSmoothTailWaits(t *testing.T) {
+	h := newHist(time.Hour)
+	for i := 1; i <= 100; i++ {
+		h.add(t0, time.Duration(200+i*8)*time.Millisecond) // 208ms~1000ms 均匀
+	}
+	got := h.actAfter(t0, h.quantile(t0, .5), 400*time.Millisecond)
+	if got < 900*time.Millisecond {
+		t.Fatalf("剩余期望始终小于换路成本,应等到分布尽头, got %v", got)
+	}
+}
+
+func TestHedgePlanDegradedNode(t *testing.T) {
+	e := testEngine(map[string][]string{"G": {"N1", "N2"}})
+	old := std
+	std = e
+	defer func() { std = old }()
+	now := time.Now()
+	n1, n2 := e.node("N1"), e.node("N2")
+	for i := 0; i < 90; i++ {
+		n1.first.add(now, 5*time.Millisecond)
+	}
+	for i := 0; i < 10; i++ {
+		n1.first.add(now, 3*time.Second)
+	}
+	for i := 0; i < 40; i++ {
+		n2.first.add(now, 20*time.Millisecond)
+		n2.dial.add(now, 10*time.Millisecond)
+	}
+	d, alt, ok := HedgePlan("N1", "G", "")
+	if !ok || alt != "N2" || d != hedgeMinDelay {
+		t.Fatalf("退化节点应在最短延迟后对冲: %v %s %v", d, alt, ok)
+	}
+}

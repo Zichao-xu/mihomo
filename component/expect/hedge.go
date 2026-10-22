@@ -97,12 +97,12 @@ func HedgePlan(node, group, host string) (delay time.Duration, alt string, ok bo
 		c.members = e.members(group)
 	}
 	e.mu.Unlock()
-	thr, ok := e.waitThreshold(c, now, true)
-	if !ok {
+	alt, af, ad := e.alternative(c, now)
+	if alt == "" {
 		return 0, "", false
 	}
-	alt, _, _ = e.alternative(c, now)
-	if alt == "" {
+	thr, ok := e.waitThreshold(c, now, true, af+ad)
+	if !ok {
 		return 0, "", false
 	}
 	if thr < hedgeMinDelay {

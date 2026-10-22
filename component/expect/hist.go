@@ -93,6 +93,37 @@ func (h *hist) quantile(now time.Time, q float64) time.Duration {
 	return upper(numBins - 1)
 }
 
+// mid 是桶的代表值(上下界的几何平均)
+func mid(i int) float64 {
+	if i == 0 {
+		return 0.5
+	}
+	return math.Sqrt(float64(upper(i-1))*float64(upper(i))) / float64(time.Millisecond)
+}
+
+// actAfter 回答"等到什么时候该换路":从 from 开始往后看,已经等了 t 还没结束时,
+// 按这个分布再等下去的期望剩余时间 E[T-t | T>t] 一旦超过换路成本 cost,就返回这个 t。
+// 超出分布里见过的一切(剩余样本不足半个)也返回——那已经是异常了。
+// 这样阈值随分布形状走:双峰(大部分很快、少数卡死)会很早出手,平滑的长尾不会急着换。
+func (h *hist) actAfter(now time.Time, from, cost time.Duration) time.Duration {
+	h.age(now)
+	costMs := float64(cost) / float64(time.Millisecond)
+	for i := binOf(from); i < numBins; i++ {
+		t := float64(upper(i)) / float64(time.Millisecond)
+		mass, sum := 0.0, 0.0
+		for j := i + 1; j < numBins; j++ {
+			if h.w[j] > 0 {
+				mass += h.w[j]
+				sum += h.w[j] * (mid(j) - t)
+			}
+		}
+		if mass < 0.5 || sum/mass > costMs {
+			return upper(i)
+		}
+	}
+	return upper(numBins - 1)
+}
+
 // tailAbove 是分布里超过 d 的比例
 func (h *hist) tailAbove(now time.Time, d time.Duration) float64 {
 	h.age(now)

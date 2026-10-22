@@ -162,9 +162,11 @@ func (e *Engine) evictHostsLocked(now time.Time) {
 	}
 }
 
-// waitThreshold:这次等待超过多久算偏离预期。
-// 节点分布的 p95 和这个站点自己习惯的 p95 取大者,长轮询类站点不会被当成线路问题。
-func (e *Engine) waitThreshold(c *Conn, now time.Time, first bool) (time.Duration, bool) {
+// waitThreshold:这次等待超过多久就该出手(或在影子模式里记为偏离预期)。
+// 有换路成本时按"再等的期望剩余时间 > 换路成本"算,从中位数开始找;
+// 没有可换的路时退回节点分布的 p95,只用于记录。
+// 再和站点自己习惯的 p95 取大者,长轮询类站点不会被当成线路问题。
+func (e *Engine) waitThreshold(c *Conn, now time.Time, first bool, cost time.Duration) (time.Duration, bool) {
 	n := e.node(c.node)
 	n.mu.Lock()
 	h := n.wait
@@ -174,7 +176,11 @@ func (e *Engine) waitThreshold(c *Conn, now time.Time, first bool) (time.Duratio
 	var thr time.Duration
 	ok := h.weight(now) >= minWait
 	if ok {
-		thr = h.quantile(now, 0.95)
+		if cost > 0 {
+			thr = h.actAfter(now, h.quantile(now, 0.5), cost)
+		} else {
+			thr = h.quantile(now, 0.95)
+		}
 	}
 	n.mu.Unlock()
 	if !ok {
@@ -192,14 +198,19 @@ func (e *Engine) waitThreshold(c *Conn, now time.Time, first bool) (time.Duratio
 	return thr, true
 }
 
-func (e *Engine) gapThreshold(node string, now time.Time) (time.Duration, bool) {
+func (e *Engine) gapThreshold(node string, now time.Time, cost time.Duration) (time.Duration, bool) {
 	n := e.node(node)
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.gap.weight(now) < minGapN {
 		return 0, false
 	}
-	thr := n.gap.quantile(now, 0.99)
+	var thr time.Duration
+	if cost > 0 {
+		thr = n.gap.actAfter(now, n.gap.quantile(now, 0.5), cost)
+	} else {
+		thr = n.gap.quantile(now, 0.99)
+	}
 	// 间隔分布全是毫秒级时,p99 也可能只有几十毫秒,低于人能感知的卡顿没有意义
 	if thr < 500*time.Millisecond {
 		thr = 500 * time.Millisecond
@@ -209,9 +220,19 @@ func (e *Engine) gapThreshold(node string, now time.Time) (time.Duration, bool) 
 
 // alternative 找同组里预期最好的另一个节点,返回它的首包 p50 和建连 p50
 func (e *Engine) alternative(c *Conn, now time.Time) (string, time.Duration, time.Duration) {
+	return e.bestPath(c, now, false)
+}
+
+// bestPath 找换路成本(建连 p50 + 首包 p50)最低的节点。
+// 对冲要的是另一条路;掐断重连则连原节点自己也算(换一条新连接可能就好了)。
+func (e *Engine) bestPath(c *Conn, now time.Time, includeSelf bool) (string, time.Duration, time.Duration) {
 	best, bestFirst, bestDial := "", time.Duration(0), time.Duration(0)
-	for _, m := range c.members {
-		if m == c.node {
+	members := c.members
+	if includeSelf && len(members) == 0 {
+		members = []string{c.node}
+	}
+	for _, m := range members {
+		if m == c.node && !includeSelf {
 			continue
 		}
 		n := e.node(m)
