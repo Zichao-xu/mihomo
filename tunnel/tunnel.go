@@ -15,6 +15,7 @@ import (
 	"github.com/metacubex/mihomo/common/atomic"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/expect"
 	"github.com/metacubex/mihomo/component/loopback"
 	"github.com/metacubex/mihomo/component/nat"
 	"github.com/metacubex/mihomo/component/process"
@@ -553,6 +554,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTCPTimeout)
 	defer cancel()
+	dialStart := time.Now()
 	remoteConn, err := retry(ctx, func(ctx context.Context) (remoteConn C.Conn, err error) {
 		remoteConn, err = proxy.DialContext(ctx, dialMetadata)
 		if err != nil {
@@ -587,11 +589,19 @@ func handleTCPConn(connCtx C.ConnContext) {
 		logMetadataErr(metadata, rule, proxy, err)
 	})
 	if err != nil {
+		node := proxy.Name()
+		for p := proxy.Unwrap(metadata, false); p != nil; p = p.Unwrap(metadata, false) {
+			node = p.Name()
+		}
+		expect.DialFail(node, proxy.Name(), metadata.Host, metadata.SrcIP.String(), time.Since(dialStart), err)
 		return
 	}
 	logMetadata(metadata, rule, remoteConn)
 
 	remoteConn = statistic.NewTCPTracker(remoteConn, statistic.DefaultManager, metadata, rule, int64(peekLen), 0, true)
+	if t, ok := remoteConn.(interface{ SetDial(time.Duration) }); ok {
+		t.SetDial(time.Since(dialStart))
+	}
 	defer func(remoteConn C.Conn) {
 		_ = remoteConn.Close()
 	}(remoteConn)

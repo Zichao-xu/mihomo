@@ -10,6 +10,7 @@ import (
 	"github.com/metacubex/mihomo/common/buf"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/expect"
 	C "github.com/metacubex/mihomo/constant"
 
 	"github.com/gofrs/uuid/v5"
@@ -57,6 +58,8 @@ type tcpTracker struct {
 
 	uploadBucketWindow   *bucketWindow
 	downloadBucketWindow *bucketWindow
+
+	obs *expect.Conn
 }
 
 func (tt *tcpTracker) ID() string {
@@ -70,6 +73,7 @@ func (tt *tcpTracker) Info() *TrackerInfo {
 func (tt *tcpTracker) Read(b []byte) (int, error) {
 	n, err := tt.Conn.Read(b)
 	download := int64(n)
+	tt.obs.Down(download)
 	if tt.pushToManager {
 		tt.manager.PushDownloaded(download)
 	}
@@ -81,6 +85,7 @@ func (tt *tcpTracker) Read(b []byte) (int, error) {
 func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 	err = tt.Conn.ReadBuffer(buffer)
 	download := int64(buffer.Len())
+	tt.obs.Down(download)
 	if tt.pushToManager {
 		tt.manager.PushDownloaded(download)
 	}
@@ -91,6 +96,7 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 
 func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(download int64) {
+		tt.obs.Down(download)
 		if tt.pushToManager {
 			tt.manager.PushDownloaded(download)
 		}
@@ -102,6 +108,7 @@ func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 func (tt *tcpTracker) Write(b []byte) (int, error) {
 	n, err := tt.Conn.Write(b)
 	upload := int64(n)
+	tt.obs.Up(upload)
 	if tt.pushToManager {
 		tt.manager.PushUploaded(upload)
 	}
@@ -113,6 +120,7 @@ func (tt *tcpTracker) Write(b []byte) (int, error) {
 func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 	upload := int64(buffer.Len())
 	err = tt.Conn.WriteBuffer(buffer)
+	tt.obs.Up(upload)
 	if tt.pushToManager {
 		tt.manager.PushUploaded(upload)
 	}
@@ -123,6 +131,7 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 
 func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(upload int64) {
+		tt.obs.Up(upload)
 		if tt.pushToManager {
 			tt.manager.PushUploaded(upload)
 		}
@@ -132,6 +141,7 @@ func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 }
 
 func (tt *tcpTracker) Close() error {
+	tt.obs.Close()
 	connErr := tt.Conn.Close()
 	tt.manager.Leave(tt)
 	return connErr
@@ -139,6 +149,11 @@ func (tt *tcpTracker) Close() error {
 
 func (tt *tcpTracker) Upstream() any {
 	return tt.Conn
+}
+
+// SetDial 告诉影子模块拨通出口用了多久
+func (tt *tcpTracker) SetDial(d time.Duration) {
+	tt.obs.SetDial(d)
 }
 
 func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
@@ -179,6 +194,12 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 		t.TrackerInfo.Rule = rule.RuleType().String()
 		t.TrackerInfo.RulePayload = rule.Payload()
 	}
+
+	host := metadata.Host
+	if host == "" {
+		host = metadata.SniffHost
+	}
+	t.obs = expect.Open(host, metadata.SrcIP.String(), metadata.RemoteAddress(), t.Chain, t.TrackerInfo.Rule, uploadTotal)
 
 	manager.Join(t)
 	return t

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/metacubex/mihomo/adapter/outboundgroup"
+	"github.com/metacubex/mihomo/component/expect"
 	"github.com/metacubex/mihomo/component/generator"
 	"github.com/metacubex/mihomo/component/geodata"
 	"github.com/metacubex/mihomo/component/updater"
@@ -24,6 +26,7 @@ import (
 	"github.com/metacubex/mihomo/hub/executor"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/rules/provider"
+	"github.com/metacubex/mihomo/tunnel"
 
 	"go.uber.org/automaxprocs/maxprocs"
 )
@@ -176,6 +179,8 @@ func main() {
 		options = append(options, hub.WithSecret(secret))
 	}
 
+	startExpect()
+
 	if err := hub.Parse(configBytes, options...); err != nil {
 		log.Fatalln("Parse config error: %s", err.Error())
 	}
@@ -204,4 +209,30 @@ func main() {
 			}
 		}
 	}
+}
+
+// startExpect 启用预期驱动选路的影子模式,只观察记录不改转发。
+// 记录目录取 MIHOMO_EXPECT_DIR,linux 上默认 /tmp/expect(内存盘,不磨闪存);MIHOMO_EXPECT=0 关闭。
+func startExpect() {
+	dir := os.Getenv("MIHOMO_EXPECT_DIR")
+	if dir == "" && runtime.GOOS == "linux" {
+		dir = "/tmp/expect"
+	}
+	expect.Start(dir)
+	expect.SetGroupMembers(func(group string) []string {
+		p, ok := tunnel.Proxies()[group]
+		if !ok {
+			return nil
+		}
+		g, ok := p.Adapter().(outboundgroup.ProxyGroup)
+		if !ok {
+			return nil
+		}
+		ps := g.Proxies()
+		names := make([]string, 0, len(ps))
+		for _, m := range ps {
+			names = append(names, m.Name())
+		}
+		return names
+	})
 }
