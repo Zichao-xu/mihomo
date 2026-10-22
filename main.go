@@ -213,12 +213,13 @@ func main() {
 
 // startExpect 启用预期驱动选路的影子模式,只观察记录不改转发。
 // 记录目录取 MIHOMO_EXPECT_DIR,linux 上默认 /tmp/expect(内存盘,不磨闪存);MIHOMO_EXPECT=0 关闭。
+// 对冲实验默认关,往 <配置目录>/expect-hedge 写比例(如 0.5)即开启,删掉即关闭,30 秒内生效。
 func startExpect() {
 	dir := os.Getenv("MIHOMO_EXPECT_DIR")
 	if dir == "" && runtime.GOOS == "linux" {
 		dir = "/tmp/expect"
 	}
-	expect.Start(dir)
+	expect.Start(dir, filepath.Join(C.Path.HomeDir(), "expect-hedge"))
 	expect.SetGroupMembers(func(group string) []string {
 		p, ok := tunnel.Proxies()[group]
 		if !ok {

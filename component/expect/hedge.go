@@ -3,6 +3,7 @@ package expect
 import (
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -12,7 +13,7 @@ import (
 // 只在 TLS 握手阶段做:此时上行只有 ClientHello,重放到另一条路只是另起一次握手,
 // 服务器那边没有任何副作用;一旦有应用数据发出,重放就可能让请求执行两次,不做。
 //
-// 默认关闭。环境变量 MIHOMO_EXPECT_HEDGE=p(0~1)打开随机实验:每条符合条件的连接
+// 默认关闭。环境变量 MIHOMO_EXPECT_HEDGE=p(0~1),或往开关文件里写 p,打开随机实验:每条符合条件的连接
 // 以概率 p 进入 hedge 组,其余进入 control 组,两组只差"允不允许对冲",
 // 比较两组的首包分布就是对冲的真实效果(线上随机对照,不靠离线回放)。
 const (
@@ -36,8 +37,14 @@ func (e *Engine) hedgeShare() float64 {
 	return e.hedge.p
 }
 
-func parseHedge() float64 {
-	p, err := strconv.ParseFloat(os.Getenv("MIHOMO_EXPECT_HEDGE"), 64)
+// parseHedge 先看环境变量,没有再看开关文件(每 30 秒重读,改了不用重启)
+func parseHedge(file string) float64 {
+	s := os.Getenv("MIHOMO_EXPECT_HEDGE")
+	if s == "" && file != "" {
+		b, _ := os.ReadFile(file)
+		s = strings.TrimSpace(string(b))
+	}
+	p, err := strconv.ParseFloat(s, 64)
 	if err != nil || p <= 0 {
 		return 0
 	}

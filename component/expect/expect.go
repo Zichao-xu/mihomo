@@ -65,14 +65,16 @@ type Engine struct {
 	out     *writer
 	rnd     *rand.Rand
 
-	counters counters
-	hedge    hedgePolicy
+	counters  counters
+	hedge     hedgePolicy
+	hedgeFile string
 }
 
 var std *Engine
 
 // Start 启用影子模式。dir 为空或环境变量 MIHOMO_EXPECT=0 时不启用。
-func Start(dir string) {
+// hedgeFile 是对冲实验的开关文件,内容为进入对冲组的比例。
+func Start(dir, hedgeFile string) {
 	if dir == "" || os.Getenv("MIHOMO_EXPECT") == "0" {
 		return
 	}
@@ -80,7 +82,8 @@ func Start(dir string) {
 		return
 	}
 	e := newEngine(newWriter(dir))
-	e.hedge.p = parseHedge()
+	e.hedgeFile = hedgeFile
+	e.hedge.p = parseHedge(hedgeFile)
 	go e.loop()
 	std = e
 }
@@ -275,8 +278,14 @@ func (e *Engine) attribute(node string, now time.Time) string {
 func (e *Engine) loop() {
 	t := time.NewTicker(tick)
 	snap := time.NewTicker(5 * time.Minute)
+	reload := time.NewTicker(30 * time.Second)
 	for {
 		select {
+		case <-reload.C:
+			p := parseHedge(e.hedgeFile)
+			e.hedge.mu.Lock()
+			e.hedge.p = p
+			e.hedge.mu.Unlock()
 		case now := <-t.C:
 			e.scan(now)
 		case now := <-snap.C:
